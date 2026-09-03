@@ -265,6 +265,27 @@ tbody tr:hover td{background:#2c2049;}
 
 /* ══════════ GALLERY VIEW ══════════ */
 #galleryView{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
+#appTabBar{display:flex;gap:8px;padding:14px 20px 0;}
+#appTabBar button{padding:9px 18px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;border:1px solid var(--border);border-bottom:none;background:var(--panel2);color:var(--muted);font-family:var(--font-body);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s var(--ease);}
+#appTabBar button.active{background:var(--panel);color:var(--text);border-color:var(--accent2);box-shadow:0 -2px 0 var(--accent) inset;}
+#appTabBar button:hover:not(.active){color:var(--text);}
+#reportsContainer{padding:18px 20px 24px;}
+.report-controls{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
+.report-controls input,.report-controls select{padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--border2);background:var(--panel2);color:var(--text);font-size:13px;font-family:var(--font-body);}
+#reportCardsGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;}
+.report-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:8px;transition:border-color .18s var(--ease),box-shadow .18s var(--ease);}
+.report-card:hover{border-color:var(--accent2);box-shadow:var(--shadow-glow);}
+.report-card .rc-head{display:flex;align-items:center;justify-content:space-between;}
+.report-card .rc-flat{font-family:var(--font-display);font-weight:700;font-size:15px;}
+.report-card .rc-floor{font-size:10.5px;color:var(--muted);}
+.report-card .rc-stat{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);}
+.report-card .rc-stat b{color:var(--text);}
+.report-card .rc-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;}
+.report-card .rc-badge.paid{background:var(--paid-bg);color:var(--paid);}
+.report-card .rc-badge.partial{background:var(--partial-bg);color:var(--partial);}
+.report-card .rc-badge.unpaid{background:var(--unpaid-bg);color:var(--unpaid);}
+.report-card .rc-dlbtn{margin-top:4px;padding:8px;border-radius:var(--radius-sm);border:1px solid var(--accent2);background:transparent;color:var(--accent2);font-family:var(--font-body);font-size:12px;font-weight:700;cursor:pointer;transition:all .15s var(--ease);}
+.report-card .rc-dlbtn:hover{background:var(--accent2);color:#fff;}
 .gallery-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;transition:border-color .18s var(--ease),box-shadow .18s var(--ease),transform .18s var(--ease);}
 .gallery-card:hover{border-color:var(--border2);box-shadow:var(--shadow-sm);transform:translateY(-2px);}
 .gallery-card .gc-thumb{width:100%;height:130px;object-fit:cover;background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:38px;position:relative;overflow:hidden;}
@@ -392,7 +413,7 @@ tbody tr:hover td{background:#2c2049;}
       <button id="authBtn">Admin Login</button>
     </div>
     <button id="newMonthBtn" disabled>+ New Month Bill</button>
-    <button id="penaltyBtn" title="Late-payment penalty rules — coming in a future update" style="width:calc(100% - 24px);margin:0 12px 8px;padding:8px;border-radius:var(--radius-sm);border:1px dashed var(--border2);background:transparent;color:var(--muted);font-size:11.5px;font-family:var(--font-body);cursor:not-allowed;opacity:.7;">⚙ Configure Late Penalties (Coming Soon)</button>
+    <button id="penaltyBtn" title="Set the late-payment fine amount" style="width:calc(100% - 24px);margin:0 12px 8px;padding:8px;border-radius:var(--radius-sm);border:1px dashed var(--border2);background:transparent;color:var(--accent2);font-size:11.5px;font-family:var(--font-body);cursor:pointer;">⚙ Configure Late Penalties</button>
     <div id="monthList"></div>
     <div class="sb-footer">Data is stored in Turso cloud (SQLite). Accessible from any device, any browser, anywhere.</div>
   </div>
@@ -546,6 +567,7 @@ async function ensureTables(){
     )`},
     {q:`CREATE INDEX IF NOT EXISTS idx_fp_month ON flat_payments(month_key)`},
     {q:`CREATE INDEX IF NOT EXISTS idx_bm_order ON billing_months(month_order)`},
+    {q:`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`},
   ]);
   // Migration for existing databases created before payment method tracking was added.
   // ALTER TABLE ... ADD COLUMN throws if the column already exists, so each is tried independently and errors are swallowed.
@@ -573,10 +595,51 @@ async function ensureTables(){
 let state={months:{},monthOrder:[]};
 let selectedMonth=null;
 let currentView='grid';
+let appTab='billing'; // 'billing' = existing month-based view, 'reports' = per-flat Maintenance Report cards
 let filters={search:'',block:'ALL',status:'ALL'};
+let lateFineAmount=0; // fixed ₹ fine admin applies to flats left fully UNPAID at month-end; 0 = disabled
 
 const round2=n=>Math.round((n+Number.EPSILON)*100)/100;
 const inr=n=>'₹'+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+// For a Balance figure specifically: negative means Paid > Due (overpaid) — show that
+// as a "+₹500.00" excess instead of a confusing negative "₹-500.00".
+const inrBalance=n=>{
+  // Treat anything within a paisa of zero as exactly zero — this is what stops a stray
+  // "-₹0.00" from floating-point rounding dust when Total Due + Carry Forward has been
+  // fully collected (e.g. paid exactly covers ₹800 due + ₹300 carry-forward = ₹1,100).
+  if(Math.abs(n)<0.005) return inr(0);
+  return n<0?'+'+inr(Math.abs(n)):inr(n);
+};
+/* ============================================================
+   DATE FORMATTING — DD-MM-YYYY everywhere in the UI/PDF/Excel.
+   Accepts a Date object, a date-only string ("YYYY-MM-DD" from
+   <input type="date">), or a full ISO timestamp string.
+   ============================================================ */
+function fmtDDMMYYYY(d){
+  if(!d) return '';
+  if(typeof d==='string' && /^\d{4}-\d{2}-\d{2}$/.test(d)){
+    // Parse date-only strings manually — new Date("YYYY-MM-DD") is UTC midnight and
+    // can shift a day backward/forward once read back via local getDate().
+    const[y,mo,day]=d.split('-');
+    return `${day}-${mo}-${y}`;
+  }
+  const dt=d instanceof Date?d:new Date(d);
+  if(isNaN(dt.getTime())) return String(d);
+  const dd=String(dt.getDate()).padStart(2,'0');
+  const mm=String(dt.getMonth()+1).padStart(2,'0');
+  return `${dd}-${mm}-${dt.getFullYear()}`;
+}
+function fmtDDMMYYYYTime(d){
+  if(!d) return '';
+  const dt=d instanceof Date?d:new Date(d);
+  if(isNaN(dt.getTime())) return String(d);
+  const timeStr=dt.toLocaleTimeString('en-IN',{hour:'numeric',minute:'2-digit',hour12:true});
+  return `${fmtDDMMYYYY(dt)}, ${timeStr}`;
+}
+/* PDF-only currency helpers — jsPDF's built-in Helvetica font has no glyph for ₹ and
+   silently prints "1" in its place, so PDFs use a plain "Rs." prefix instead. */
+const inrPdf=n=>'Rs. '+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const balPdf=n=>n<-0.004?'+ '+inrPdf(Math.abs(n)):inrPdf(n);
 const monthLabel=key=>{const[y,m]=key.split('-');return new Date(+y,+m-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});};
 
 /* ── Status rules (controls tile colour) ──────────────────────────
@@ -609,9 +672,12 @@ async function loadState(){
     const results=await sql([
       {q:'SELECT * FROM billing_months ORDER BY month_order ASC'},
       {q:'SELECT * FROM flat_payments'},
+      {q:"SELECT value FROM app_settings WHERE key='late_fine_amount'"},
     ]);
     const months=rowsToObjects(results[0]);
     const payments=rowsToObjects(results[1]);
+    const settingsRows=rowsToObjects(results[2]);
+    lateFineAmount=settingsRows.length?round2(parseFloat(settingsRows[0].value)||0):0;
     state={months:{},monthOrder:[]};
     for(const m of months){
       state.monthOrder.push(m.key);
@@ -631,7 +697,7 @@ async function loadState(){
           balance:+p.balance, status:p.status, paidDate:p.paid_date||null,
           paymentMethod:p.payment_method||null, paymentComments:p.payment_comments||null,
           paymentScreenshot:p.payment_screenshot||null, updatedAt:p.updated_at||null,
-          prevStatus:p.prev_status||null
+          prevStatus:p.prev_status||null, penalty:+(p.penalty||0)
         };
       }
     }
@@ -656,8 +722,8 @@ async function saveMonthToTurso(key){
   for(const f of ALL_FLATS){
     const fd=m.flats[f.id]||{};
     stmts.push({
-      q:`INSERT OR REPLACE INTO flat_payments (month_key,flat_id,carry_forward,due,paid,balance,status,paid_date,payment_method,payment_comments,payment_screenshot,updated_at,prev_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      params:[key,f.id,fd.carryForward||0,fd.due||0,fd.paid||0,fd.balance||0,fd.status||'unpaid',fd.paidDate||null,fd.paymentMethod||null,fd.paymentComments||null,fd.paymentScreenshot||null,fd.updatedAt||null,fd.prevStatus||null]
+      q:`INSERT OR REPLACE INTO flat_payments (month_key,flat_id,carry_forward,due,paid,balance,status,paid_date,payment_method,payment_comments,payment_screenshot,updated_at,prev_status,penalty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      params:[key,f.id,fd.carryForward||0,fd.due||0,fd.paid||0,fd.balance||0,fd.status||'unpaid',fd.paidDate||null,fd.paymentMethod||null,fd.paymentComments||null,fd.paymentScreenshot||null,fd.updatedAt||null,fd.prevStatus||null,fd.penalty||0]
     });
   }
   await sql(stmts);
@@ -841,16 +907,14 @@ function daysPastLastDay(key){
 }
 /*
   status: 'early'   – before last day of month
-          'ontime'  – exactly last day
-          'grace'   – 1-5 days past last day (can still close manually)
-          'overdue' – >5 days past last day  (auto-close triggers)
+          'ontime'  – exactly last day (closes automatically today)
+          'overdue' – past last day and still not closed (auto-close triggers)
 */
 function getMonthCloseStatus(key){
   const d=daysPastLastDay(key);
   if(d<0)  return {status:'early', daysLeft:-d};
   if(d===0) return {status:'ontime'};
-  if(d<=5) return {status:'grace',  daysOver:d, graceLeft:5-d};
-  return          {status:'overdue',daysOver:d};
+  return {status:'overdue',daysOver:d};
 }
 async function closeMonth(key,bwssTotal,collected,balance,autoClose=false){
   await saveSnapshot(key, autoClose?'auto_close':'close'); // snapshot BEFORE sealing
@@ -870,16 +934,20 @@ async function reopenMonth(key){
   m.isClosed=false; m.closedAt=null; m.autoClosedAt=null;
   await saveMonthToTurso(key);
 }
-/* Auto-close any month >5 days past its last day that isn't closed yet */
+/* Auto-close any month that has reached (or passed) its last day and isn't closed yet.
+   Carry-forward to the next month is unaffected by this — it's computed straight from
+   each flat's due vs. paid regardless of whether the month is marked closed, so dues
+   flow into the next month's cycle immediately either way. */
 async function autoCloseOverdueMonths(){
   for(const key of state.monthOrder){
     const m=state.months[key];
     if(m.isClosed) continue;
-    if(getMonthCloseStatus(key).status!=='overdue') continue;
+    const st=getMonthCloseStatus(key).status;
+    if(st!=='ontime' && st!=='overdue') continue;
     const flatsArr=ALL_FLATS.map(f=>({...f,...m.flats[f.id]}));
     const collected=round2(flatsArr.reduce((s,f)=>s+f.paid,0));
     await closeMonth(key,m.closedBwssTotal||0,collected,round2(collected-(m.closedBwssTotal||0)),true);
-    toast(`⚠ ${m.label} was auto-closed (>5 days past month end)`,'warn');
+    toast(`🔒 ${m.label} was auto-closed on its last day — sealed by President`,'warn');
   }
 }
 
@@ -905,9 +973,15 @@ function computeMonthFlats(baseShare,prevMonth,existingFlats){
   for(const f of ALL_FLATS){
     const prevF=prevMonth?prevMonth.flats[f.id]:null;
     // carryForward = unpaid balance remaining at end of previous month
-    const carryForward=prevF?round2(Math.max(0,prevF.due-prevF.paid)):0;
+    let carryForward=prevF?round2(Math.max(0,prevF.due-prevF.paid)):0;
     // prevStatus drives colour inheritance (partial→yellow, unpaid/paid-fresh→red)
     const prevStatus=prevF?prevF.status:null;
+    // Late fine — flats left fully UNPAID (red) last month get a fixed admin-set fine
+    // added on top of their carry-forward this month. Left unpaid again, next month's
+    // carry-forward already includes this fine, so it naturally compounds each
+    // consecutive unpaid month.
+    const penalty=(prevStatus==='unpaid' && lateFineAmount>0) ? lateFineAmount : 0;
+    if(penalty>0) carryForward=round2(carryForward+penalty);
     const due=round2(baseShare+carryForward);
     const ex=existingFlats?existingFlats[f.id]:null;
     const paid=ex?ex.paid:0;
@@ -919,7 +993,7 @@ function computeMonthFlats(baseShare,prevMonth,existingFlats){
     const balance=round2(due-paid);
     const status=computeFlatStatus(balance,paid,carryForward,prevStatus);
     flats[f.id]={carryForward,due,paid,paidDate,balance,status,prevStatus,
-                 paymentMethod,paymentComments,paymentScreenshot,updatedAt};
+                 paymentMethod,paymentComments,paymentScreenshot,updatedAt,penalty};
   }
   return flats;
 }
@@ -954,9 +1028,10 @@ async function editMonthTotal(key,newTotal,prop){
   await saveMonthToTurso(key);
   if(prop){const idx=state.monthOrder.indexOf(key);for(let i=idx+1;i<state.monthOrder.length;i++) await saveMonthToTurso(state.monthOrder[i]);}
 }
-async function recordPayment(key,flatId,amount,date,prop,method,comments,screenshotsJson){
+async function recordPayment(key,flatId,amount,date,prop,method,comments,screenshotsJson,dueOverride){
   await saveSnapshot(key,'payment'); // snapshot BEFORE change
   const f=state.months[key].flats[flatId];
+  if(dueOverride!=null) f.due=round2(dueOverride); // e.g. halved for a "No Occupancy" flat
   f.paid=round2(Math.max(0,amount));
   f.paidDate=f.paid>0?(date||new Date().toISOString().slice(0,10)):null;
   f.balance=round2(f.due-f.paid);
@@ -1140,7 +1215,7 @@ function renderSidebar(){
    ============================================================ */
 function buildSealStamp(closedAt){
   const dt=closedAt?new Date(closedAt):new Date();
-  const dateStr=dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+  const dateStr=fmtDDMMYYYY(dt);
   const timeStr=dt.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
   // SVG ring with dashed border — green ink stamp look
   return `<div class="sealed-stamp">
@@ -1208,10 +1283,30 @@ const TURSO_TOKEN = 'your-token-here';</pre>
     return;
   }
   if(!selectedMonth||!state.months[selectedMonth]){
-    main.innerHTML=`<div class="empty">
+    main.innerHTML=`
+      <div id="appTabBar">
+        <button id="tabBillingBtn" class="${appTab==='billing'?'active':''}">📅 Monthly Billing</button>
+        <button id="tabReportsBtn" class="${appTab==='reports'?'active':''}">🧾 Maintenance Reports</button>
+      </div>
+      ${appTab==='reports'?`<div id="reportsContainer"></div>`:`<div class="empty">
       <h2>Connected ✅</h2>
       <p>${isAdmin()?`Click "+ New Month Bill" in the sidebar to set the first month's maintenance amount. The same amount applies equally to all ${TOTAL_FLATS} flats, and unpaid balances carry forward automatically.`:'No billing data available yet. Please check back once Admin publishes the first bill.'}</p>
-    </div>`;
+    </div>`}`;
+    document.getElementById('tabBillingBtn').onclick=()=>{appTab='billing';render();};
+    document.getElementById('tabReportsBtn').onclick=()=>{appTab='reports';render();};
+    if(appTab==='reports') renderReportCardsView();
+    return;
+  }
+  if(appTab==='reports'){
+    main.innerHTML=`
+      <div id="appTabBar">
+        <button id="tabBillingBtn" class="${appTab==='billing'?'active':''}">📅 Monthly Billing</button>
+        <button id="tabReportsBtn" class="${appTab==='reports'?'active':''}">🧾 Maintenance Reports</button>
+      </div>
+      <div id="reportsContainer"></div>`;
+    document.getElementById('tabBillingBtn').onclick=()=>{appTab='billing';render();};
+    document.getElementById('tabReportsBtn').onclick=()=>{appTab='reports';render();};
+    renderReportCardsView();
     return;
   }
   const key=selectedMonth,m=state.months[key];
@@ -1231,6 +1326,10 @@ const TURSO_TOKEN = 'your-token-here';</pre>
   const cashInflowLabel=prevMonth&&prevMonth.isClosed?(cashInflow>=0?'💰 Cash Surplus from Prev Month':'⚠ Cash Deficit from Prev Month'):'💰 Cash Inflow (Prev Month)';
 
   main.innerHTML=`
+    <div id="appTabBar">
+      <button id="tabBillingBtn" class="${appTab==='billing'?'active':''}">📅 Monthly Billing</button>
+      <button id="tabReportsBtn" class="${appTab==='reports'?'active':''}">🧾 Maintenance Reports</button>
+    </div>
     <div id="topbar">
       <div>
         <h2>${m.label} ${!isLatest?'<span style="font-size:11px;color:var(--muted);font-weight:400;">(archived)</span>':''}</h2>
@@ -1269,11 +1368,11 @@ const TURSO_TOKEN = 'your-token-here';</pre>
       </div></div>
     </div>
     ${m.isClosed?`
-    ${m.autoClosedAt?`<div class="banner-auto">⚠ This month was <strong>auto-closed by the system</strong> (${m.autoClosedAt?new Date(m.autoClosedAt).toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'}):''}) because it was more than 5 days past month-end without being closed. Only Admin can reopen it to add society expense records.</div>`:''}
+    ${m.autoClosedAt?`<div class="banner-auto">🔒 This month was <strong>auto-closed by the system on its last day</strong> (${m.autoClosedAt?fmtDDMMYYYY(m.autoClosedAt):''}), sealed by President, and its carry-forward has already flowed into next month. Admin can reopen it to add society expense records and reseal.</div>`:''}
     <div class="closure-panel" style="position:relative;overflow:hidden;">
       <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
         <div style="flex:1;min-width:220px;">
-          <div class="cp-title">✅ Month Sealed — ${m.closedAt?new Date(m.closedAt).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'}):''}</div>
+          <div class="cp-title">✅ Month Sealed — ${m.closedAt?fmtDDMMYYYYTime(m.closedAt):''}</div>
           <div class="cp-row"><span>Amount Collected from Flats</span><span style="color:var(--paid)">${inr(m.closedCollected)}</span></div>
           ${round2(Object.values(m.flats).reduce((s,f)=>s+(f.carryForward||0),0))>0?`<div class="cp-row"><span>+ Cash Inflow from Previous Month</span><span style="color:var(--accent2)">${inr(round2(Object.values(m.flats).reduce((s,f)=>s+(f.carryForward||0),0)))}</span></div>`:''}
           <div class="cp-row"><span>− Society Expenses Paid This Month</span><span style="color:var(--unpaid)">${inr(m.closedBwssTotal)}</span></div>
@@ -1315,6 +1414,8 @@ const TURSO_TOKEN = 'your-token-here';</pre>
   document.getElementById('viewGridBtn').onclick=()=>{currentView='grid';render();};
   document.getElementById('viewTableBtn').onclick=()=>{currentView='table';render();};
   document.getElementById('viewGalleryBtn').onclick=()=>{currentView='gallery';render();};
+  document.getElementById('tabBillingBtn').onclick=()=>{appTab='billing';render();};
+  document.getElementById('tabReportsBtn').onclick=()=>{appTab='reports';render();};
   document.getElementById('exportPdfBtn').onclick=()=>openExportFilterModal(key,'pdf');
   document.getElementById('exportXlsBtn').onclick=()=>openExportFilterModal(key,'excel');
   if(admin){
@@ -1382,10 +1483,19 @@ function renderBlockGrid(key,flatsArr){
           ? (displayBal>=1000?(displayBal/1000).toFixed(displayBal%1000===0?0:1)+'k':Math.round(displayBal))
           : '';
         const isDefault=(f.status==='unpaid' && m.baseShare===0 && displayBal===DEFAULT_SHARE);
+        // Paid tiles show the total amount actually received, in bold black — same
+        // spot/format as the balance figure shown on partial/unpaid tiles. When the
+        // flat paid more than its Total Due (e.g. an extra receipt or Parking pushed
+        // it over), prefix with "+" to show it as an excess rather than a plain figure.
+        const isOverpaid=f.status==='paid' && f.paid>f.due+0.004;
+        const paidStr=(f.status==='paid' && f.paid>0)
+          ? (f.paid>=1000?(f.paid/1000).toFixed(f.paid%1000===0?0:1)+'k':Math.round(f.paid))
+          : '';
         html+=`<div class="tile status-${f.status} ${admin?'admin-edit':''} ${f.paymentScreenshot?'has-bills':''}" data-flat="${f.id}" style="${isDefault?'opacity:.82;':''}" title="${isDefault?'Default ₹20,000 — bill amount not set yet':''}">
           <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;line-height:1.1;">
             <b style="font-size:11.5px;">${f.num}</b>
             ${balStr?`<span style="font-size:8px;opacity:${isDefault?'.7':'.9'};font-weight:700;">${isDefault?'~':''}₹${balStr}</span>`:''}
+            ${paidStr?`<span style="font-size:8px;font-weight:800;color:#000;">${isOverpaid?'+':''}₹${paidStr}</span>`:''}
           </div>
         </div>`;
       }
@@ -1411,12 +1521,12 @@ function formatUpdatedStamp(f){
   const labelHTML=`<b style="color:#ff8c00;font-weight:800;">🕐 Updated:</b>`;
   if(f.updatedAt){
     const d=new Date(f.updatedAt);
-    const dateStr=d.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+    const dateStr=fmtDDMMYYYY(d);
     const timeStr=d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
     return `${labelHTML} <b style="color:var(--partial);font-weight:800;">${dateStr}</b> <b style="color:var(--text);font-weight:800;">${timeStr}</b>`;
   }
   if(f.paidDate){
-    const dateStr=new Date(f.paidDate).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+    const dateStr=fmtDDMMYYYY(f.paidDate);
     return `${labelHTML} <b style="color:var(--partial);font-weight:800;">${dateStr}</b>`;
   }
   return '—';
@@ -1455,7 +1565,6 @@ function showTooltip(e,f){
       <div class="tt-bills-section">
         <div class="tt-bills-title">📎 Receipt${receiptCount>1?'s ('+receiptCount+')':''}</div>
         <div class="tt-bill-strip">${thumbsHTML}</div>
-        <div class="tt-updated">${formatUpdatedStamp(f)}</div>
       </div>`;
   }
 
@@ -1463,6 +1572,9 @@ function showTooltip(e,f){
   const baseShareThisMonth=round2(f.due-(f.carryForward||0));
   const cfRow=f.carryForward>0.004
     ?`<div class="tt-row" style="color:var(--partial)"><span>↩ Carry Forward</span><b>${inr(f.carryForward)}</b></div>`
+    :'';
+  const fineRow=(f.penalty||0)>0.004
+    ?`<div class="tt-row" style="color:var(--unpaid);"><span>⚠ Late Fine (incl. above)</span><b>${inr(f.penalty)}</b></div>`
     :'';
   // Previous month status badge for context
   const prevBadge=f.prevStatus
@@ -1478,17 +1590,19 @@ function showTooltip(e,f){
     <div class="tt-title">Flat ${f.id} <span style="color:var(--muted);font-weight:400;font-size:11px;">(${f.floor})</span></div>
     <div class="tt-row"><span>Base Share</span><b>${inr(baseShareThisMonth)}</b></div>
     ${cfRow}
+    ${fineRow}
     <div class="tt-row"><span>Total Due</span><b>${inr(f.due)}</b></div>
     <div class="tt-row"><span>Paid</span><b style="color:${f.paid>0?'var(--paid)':'var(--text)'}">${inr(f.paid)}</b></div>
-    <div class="tt-row"><span>Balance</span><b style="color:${f.balance>0.004?'var(--unpaid)':'var(--paid)'}">${inr(f.balance)}</b></div>
-    <div class="tt-row"><span>Paid On</span><b>${f.paidDate||'—'}</b></div>
+    <div class="tt-row"><span>Balance</span><b style="color:${f.balance>0.004?'var(--unpaid)':'var(--paid)'}">${inrBalance(f.balance)}</b></div>
+    <div class="tt-row"><span>Paid On</span><b>${f.paidDate?fmtDDMMYYYY(f.paidDate):'—'}</b></div>
     ${f.paymentMethod?`<div class="tt-row"><span>Method</span><b>${f.paymentMethod==='upi'?'📱 UPI':'💵 Cash'}</b></div>`:''}
     ${f.paymentMethod==='cash'&&f.paymentComments?`<div class="tt-row"><span>Comment</span><b style="font-weight:500;font-size:11px;">${f.paymentComments}</b></div>`:''}
     ${prevBadge}
     <div class="tt-status" style="color:${f.status==='paid'?'var(--paid)':f.status==='partial'?'var(--partial)':'var(--unpaid)'}">${f.status.toUpperCase()}</div>
     ${lifetimeRow}
     <div class="tt-bills-section" style="pointer-events:auto;padding-top:6px;border-top:none;"><span class="tt-stmt-link" data-flatid="${f.id}" style="font-size:11px;color:var(--accent2);font-weight:700;cursor:pointer;text-decoration:underline;">📜 View full payment statement</span></div>
-    ${receiptHTML}`;
+    ${receiptHTML}
+    <div class="tt-updated">${formatUpdatedStamp(f)}</div>`;
 
   const stmtLink=tt.querySelector('.tt-stmt-link');
   if(stmtLink) stmtLink.addEventListener('click',()=>{ hideTooltip(); openFlatStatementModal(stmtLink.dataset.flatid); });
@@ -1609,7 +1723,10 @@ function getFlatLedger(flatId){
     const f=m.flats[flatId];
     if(f && f.paid>0){
       running=round2(running+f.paid);
-      rows.push({monthKey:key,month:m.label,date:f.paidDate||'—',amount:f.paid,total:running});
+      // If no specific paid-on date was recorded, default to the last day of that
+      // month rather than leaving it blank.
+      const rowDate=f.paidDate||getLastDayOfMonth(key).toISOString().slice(0,10);
+      rows.push({monthKey:key,month:m.label,date:rowDate,time:f.updatedAt||null,amount:f.paid,total:running});
     }
   }
   return rows;
@@ -1619,7 +1736,7 @@ function openFlatStatementModal(flatId){
   const grandTotal=rows.length?rows[rows.length-1].total:0;
   const bodyRows=rows.map(r=>`<tr>
       <td>${r.month}</td>
-      <td style="font-family:var(--font-mono);">${r.date}</td>
+      <td style="font-family:var(--font-mono);">${r.date?fmtDDMMYYYY(r.date):'—'}</td>
       <td class="num">${inr(r.amount)}</td>
       <td class="num" style="font-weight:700;">${inr(r.total)}</td>
     </tr>`).join('');
@@ -1636,10 +1753,134 @@ function openFlatStatementModal(flatId){
           </tbody>
         </table>
       </div>
-      <div class="modalbtns"><button class="btn" id="closeStmtBtn">Close</button></div>
+      <div class="modalbtns">
+        <button class="btn" id="closeStmtBtn">Close</button>
+        <button class="btn primary" id="downloadCertBtn">⬇ Download Certificate (PDF)</button>
+      </div>
     </div></div>`;
   document.getElementById('closeStmtBtn').onclick=closeModal;
+  document.getElementById('downloadCertBtn').onclick=()=>exportFlatCertificatePDF(flatId);
   document.getElementById('ov').addEventListener('click',e=>{if(e.target.id==='ov')closeModal();});
+}
+
+/* ============================================================
+   PER-FLAT MAINTENANCE REPORT CERTIFICATE (PDF)
+   A running, ever-growing record for one flat — every month it has paid,
+   with Amount Received, Date, and Time — using the same header/branding
+   as the main billing statement export. Regenerating it after a new
+   payment is recorded automatically includes the new month's row.
+   ============================================================ */
+function exportFlatCertificatePDF(flatId){
+  const ledger=getFlatLedger(flatId);
+  const grandTotal=ledger.length?ledger[ledger.length-1].total:0;
+  const{jsPDF}=window.jspdf;const doc=new jsPDF();
+  const pageW=doc.internal.pageSize.getWidth();
+
+  // ── Header banner (same branding as the main billing statement) ──
+  doc.setFillColor(26,19,48);
+  doc.rect(0,0,pageW,36,'F');
+  doc.setDrawColor(155,93,229);
+  doc.setLineWidth(1.1);
+  doc.line(0,36,pageW,36);
+  try{ doc.addImage(LOGO_DATA_URL,'JPEG',12,6,24,24); }catch(e){}
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica','bold');
+  doc.setFontSize(14.5);
+  doc.text(ASSOC_NAME,42,15);
+  doc.setFont('helvetica','normal');
+  doc.setFontSize(10);
+  doc.setTextColor(190,205,225);
+  doc.text('Maintenance Report Certificate',42,21.5);
+  doc.setFontSize(8.5);
+  doc.setTextColor(140,160,190);
+  doc.text(`Flat ${flatId}   ·   Generated ${fmtDDMMYYYYTime(new Date())}`,42,27.5);
+
+  // ── Certifying statement + total ──
+  let y=46;
+  doc.setTextColor(30,35,45);
+  doc.setFont('helvetica','normal');doc.setFontSize(10.5);
+  doc.text(`This is to certify the maintenance payment record on file for Flat ${flatId}:`,14,y);
+  y+=10;
+  doc.setFont('helvetica','bold');doc.setFontSize(9);
+  doc.text('Total Paid Till Date',14,y);
+  doc.setFont('helvetica','normal');doc.setFontSize(11);
+  doc.setTextColor(31,157,99);
+  doc.text(inrPdf(grandTotal),14,y+6);
+  doc.setTextColor(30,35,45);
+  doc.setFont('helvetica','bold');doc.setFontSize(9);
+  doc.text('Months on Record',80,y);
+  doc.setFont('helvetica','normal');doc.setFontSize(11);
+  doc.text(String(ledger.length),80,y+6);
+  doc.setDrawColor(220,225,232);doc.setLineWidth(.3);doc.line(14,y+11,pageW-14,y+11);
+
+  const rows=ledger.map(r=>{
+    const timeStr=r.time?new Date(r.time).toLocaleTimeString('en-IN',{hour:'numeric',minute:'2-digit',hour12:true}):'—';
+    return[r.month,inrPdf(r.amount),r.date?fmtDDMMYYYY(r.date):'—',timeStr,inrPdf(r.total)];
+  });
+  doc.autoTable({
+    startY:y+16,
+    head:[['Month','Amount Received','Date','Time','Running Total']],
+    body:rows.length?rows:[['No payments recorded yet','—','—','—','—']],
+    styles:{fontSize:8.5,cellPadding:2.8,lineColor:[224,229,236],lineWidth:.15},
+    headStyles:{fillColor:[26,19,48],textColor:255,fontStyle:'bold',fontSize:8.5},
+    alternateRowStyles:{fillColor:[245,248,252]},
+    didDrawPage(data){
+      const pc=doc.internal.getNumberOfPages();
+      doc.setFontSize(7.5);doc.setTextColor(150,158,170);doc.setFont('helvetica','normal');
+      doc.text(`${ASSOC_NAME} · System-generated certificate`,14,doc.internal.pageSize.getHeight()-8);
+      doc.text(`Page ${data.pageNumber} of ${pc}`,pageW-14,doc.internal.pageSize.getHeight()-8,{align:'right'});
+    }
+  });
+  doc.save(`MaintenanceCertificate_${flatId}.pdf`);
+  toast(`⬇ Certificate downloaded for Flat ${flatId}`,'ok');
+}
+
+/* ============================================================
+   MAINTENANCE REPORT — CARDS TAB
+   A separate, cross-month tab: one card per flat (all 120 flats),
+   each showing lifetime totals and a one-click PDF Certificate
+   download. Independent of whichever month is selected in the sidebar.
+   ============================================================ */
+let reportFilters={search:'',block:'ALL'};
+function renderReportCardsView(){
+  const container=document.getElementById('reportsContainer');
+  const latestKey=state.monthOrder.length?state.monthOrder[state.monthOrder.length-1]:null;
+  const search=reportFilters.search.trim().toUpperCase();
+  const flats=ALL_FLATS.filter(f=>{
+    if(reportFilters.block!=='ALL'&&f.block!==reportFilters.block) return false;
+    if(search&&!f.id.toUpperCase().includes(search)) return false;
+    return true;
+  });
+  container.innerHTML=`
+    <div class="report-controls">
+      <input type="text" id="reportSearchInput" placeholder="🔍 Search flat (e.g. A-301)" value="${reportFilters.search}">
+      <select id="reportBlockFilter">
+        <option value="ALL">All Blocks</option>
+        ${BLOCKS.map(b=>`<option value="${b.block}" ${reportFilters.block===b.block?'selected':''}>Block ${b.block}</option>`).join('')}
+      </select>
+      <span class="hint" style="margin:auto 0 auto auto;">${flats.length} of ${TOTAL_FLATS} flats · click a card's PDF button for that flat's certificate</span>
+    </div>
+    <div id="reportCardsGrid">
+      ${flats.map(f=>{
+        const ledger=getFlatLedger(f.id);
+        const lifetimePaid=ledger.length?ledger[ledger.length-1].total:0;
+        const latestStatus=latestKey&&state.months[latestKey].flats[f.id]?state.months[latestKey].flats[f.id].status:null;
+        return `<div class="report-card">
+          <div class="rc-head">
+            <div><div class="rc-flat">Flat ${f.id}</div><div class="rc-floor">${f.floor} · Block ${f.block}</div></div>
+            ${latestStatus?`<span class="rc-badge ${latestStatus}">${latestStatus.toUpperCase()}</span>`:''}
+          </div>
+          <div class="rc-stat"><span>Total Paid Till Date</span><b style="color:var(--paid);">${inr(lifetimePaid)}</b></div>
+          <div class="rc-stat"><span>Months on Record</span><b>${ledger.length}</b></div>
+          <button class="rc-dlbtn" data-flat="${f.id}">⬇ PDF Maintenance Certificate</button>
+        </div>`;
+      }).join('')||'<div class="hint" style="grid-column:1/-1;text-align:center;padding:30px;">No flats match this filter.</div>'}
+    </div>`;
+  document.getElementById('reportSearchInput').oninput=e=>{reportFilters.search=e.target.value;renderReportCardsView();};
+  document.getElementById('reportBlockFilter').onchange=e=>{reportFilters.block=e.target.value;renderReportCardsView();};
+  container.querySelectorAll('.rc-dlbtn').forEach(btn=>{
+    btn.onclick=()=>exportFlatCertificatePDF(btn.dataset.flat);
+  });
 }
 
 function moveTooltip(e){
@@ -1683,9 +1924,9 @@ function renderTableView(key,flatsArr){
       <td class="num">${inr(f.carryForward)}</td>
       <td class="num">${inr(f.due)}</td>
       <td class="num">${inr(f.paid)}</td>
-      <td class="num" style="color:${f.balance>0.004?'var(--unpaid)':'var(--muted)'}">${inr(f.balance)}</td>
+      <td class="num" style="color:${f.balance>0.004?'var(--unpaid)':'var(--muted)'}">${inrBalance(f.balance)}</td>
       <td><span class="status-chip ${f.status}">${f.status.toUpperCase()}</span></td>
-      <td style="color:var(--muted);font-size:12px;">${f.paidDate||'—'}${f.updatedAt?`<br><span style="font-size:10px;">${formatUpdatedStamp(f)}</span>`:''}</td>
+      <td style="color:var(--muted);font-size:12px;">${f.paidDate?fmtDDMMYYYY(f.paidDate):'—'}${f.updatedAt?`<br><span style="font-size:10px;">${formatUpdatedStamp(f)}</span>`:''}</td>
       <td style="font-size:12px;">${methodCell}</td>
       <td style="white-space:nowrap;">
         <button class="paybtn" data-flat="${f.id}" ${admin?'':'disabled'}>💳 ${admin?'Edit':'View'}</button>
@@ -1846,6 +2087,58 @@ function setBtnLoading(id,loading,label){
   const b=document.getElementById(id);if(!b)return;
   b.disabled=loading;
   b.innerHTML=loading?`<span class="spinner"></span>${label||'Saving…'}`:label||'Save';
+}
+
+/* ---- late-payment penalty config ---- */
+async function saveLateFineAmount(amt){
+  lateFineAmount=round2(Math.max(0,amt));
+  await sql([{q:`INSERT OR REPLACE INTO app_settings (key,value) VALUES ('late_fine_amount', ?)`,params:[String(lateFineAmount)]}]);
+}
+async function recomputeAllOpenMonths(){
+  // Walk months chronologically so each recompute sees the freshly-updated
+  // previous month (needed for the fine to cascade/compound correctly).
+  // Closed months are left untouched — their final figures don't change.
+  for(const key of state.monthOrder){
+    const m=state.months[key];
+    if(m.isClosed) continue;
+    recomputeMonth(key);
+    await saveMonthToTurso(key);
+  }
+}
+function openPenaltyConfigModal(){
+  if(!isAdmin()){openLoginModal();return;}
+  const unpaidNow=state.monthOrder.length
+    ? Object.values(state.months[state.monthOrder[state.monthOrder.length-1]].flats).filter(f=>f.status==='unpaid').length
+    : 0;
+  document.getElementById('modalRoot').innerHTML=`
+    <div class="overlay" id="ov"><div class="modal" style="width:420px;">
+      <h3>⚙ Configure Late Penalties</h3>
+      <div class="hint" style="margin-top:0;margin-bottom:12px;">
+        Flats left fully <b style="color:var(--unpaid);">Unpaid</b> (🔴, ₹0 paid) at month-end get this fixed fine added on top of their carry-forward in <b>next month's bill</b>. If a flat stays unpaid again, the fine is added again — it compounds each consecutive unpaid month. Flats with a <b style="color:var(--partial);">Partial</b> payment are never fined.
+      </div>
+      <label>Late Fine Amount (₹) — 0 disables the fine</label>
+      <input type="number" id="pfAmt" min="0" step="0.01" value="${lateFineAmount}" placeholder="e.g. 50">
+      <div class="hint" style="margin-top:6px;">Currently <b style="color:var(--unpaid);">${unpaidNow}</b> flat${unpaidNow!==1?'s':''} unpaid in the latest month — saving will apply this fine to them starting next month's bill (and re-apply it to any already-created future months).</div>
+      <div class="err" id="pfErr" style="margin-top:6px;"></div>
+      <div class="modalbtns">
+        <button class="btn" id="pfCancel">Cancel</button>
+        <button class="btn primary" id="pfSave">Save</button>
+      </div>
+    </div></div>`;
+  document.getElementById('pfCancel').onclick=closeModal;
+  document.getElementById('ov').addEventListener('click',e=>{if(e.target.id==='ov')closeModal();});
+  document.getElementById('pfSave').onclick=async()=>{
+    const val=parseFloat(document.getElementById('pfAmt').value);
+    const errEl=document.getElementById('pfErr');
+    if(isNaN(val)||val<0){errEl.textContent='Enter a valid amount (0 or more).';return;}
+    setBtnLoading('pfSave',true,'Saving…');
+    try{
+      await saveLateFineAmount(val);
+      await recomputeAllOpenMonths();
+      closeModal();render();
+      toast(val>0?`✅ Late fine set to ${inr(val)} — applied to open months`:'✅ Late fine disabled','ok');
+    }catch(e){errEl.textContent='❌ Save failed: '+e.message;setBtnLoading('pfSave',false,'Save');}
+  };
 }
 
 /* ---- new month ---- */
@@ -2055,8 +2348,36 @@ function openPaymentModal(key,flatId){
   const cur=f.status;
   const todayStr=new Date().toISOString().slice(0,10);
 
-  // Multi-receipt rows: each row has date, billNo, amount, method, imageDataUrl
-  let receipts=[{uid:'r0',date:f.paidDate||todayStr,billNo:'',amount:'',method:f.paymentMethod||'',imageDataUrl:null,imageName:null}];
+  // Parking charge — a flat ₹300 (editable) add-on, ticked on/off by admin, auto-summed
+  // into the total only when checked. On edit, recover its on/off state + amount from a
+  // "Parking: ₹NNN" marker appended to paymentComments at save time (see save handler below).
+  let parkingEnabled=false, parkingAmount=300;
+  if(f.paid>0 && f.paymentComments){
+    const pm=f.paymentComments.match(/Parking:\s*₹?\s*([\d.]+)/i);
+    if(pm){ parkingEnabled=true; parkingAmount=round2(parseFloat(pm[1])||300); }
+  }
+
+  // No Occupancy — halves this flat's Total Due for the month (e.g. ₹800 → ₹400).
+  // originalDue always holds the flat's true, un-halved due; recovered from a
+  // "NoOccupancy|FullDue:NNN" marker on edit so re-toggling never compounds the reduction.
+  let noOccupancy=false, originalDue=f.due;
+  if(f.paid>0 && f.paymentComments){
+    const om=f.paymentComments.match(/NoOccupancy\|FullDue:([\d.]+)/i);
+    if(om){ noOccupancy=true; originalDue=round2(parseFloat(om[1])||f.due*2); }
+  }
+  function effectiveDue(){
+    const chk=document.getElementById('pOccupancyChk');
+    const on=chk?chk.checked:noOccupancy;
+    return on?round2(originalDue/2):originalDue;
+  }
+
+  // Multi-receipt rows: each row has date, billNo, amount, method, imageDataUrl.
+  // For a brand-new payment (nothing recorded yet), prefill the amount with the flat's
+  // full due (halved if No Occupancy is already set) so a straight "Save" records a
+  // full payment by default — admin only needs to edit it down for a Partial payment,
+  // or clear it to 0, for the status to auto-adjust to Partial/Unpaid accordingly.
+  const defaultAmount=f.paid>0?'':String(noOccupancy?round2(originalDue/2):originalDue);
+  let receipts=[{uid:'r0',date:f.paidDate||todayStr,billNo:'',amount:defaultAmount,method:f.paymentMethod||'',imageDataUrl:null,imageName:null}];
 
   // If editing existing payment, restore ALL receipt rows from stored JSON array
   if(f.paid>0){
@@ -2101,7 +2422,7 @@ function openPaymentModal(key,flatId){
         const m=f.paymentComments.match(/Bill#([^\s|;]+)/);
         if(m) recoveredBillNo=m[1];
       }
-      receipts[0].amount=s.amount>0?s.amount:f.paid;
+      receipts[0].amount=s.amount>0?s.amount:round2(f.paid-(parkingEnabled?parkingAmount:0));
       receipts[0].method=s.method||f.paymentMethod||'';
       receipts[0].imageDataUrl=s.dataUrl||null;
       receipts[0].imageName=s.name||('receipt_'+flatId+'.jpg');
@@ -2109,17 +2430,24 @@ function openPaymentModal(key,flatId){
       receipts[0].billNo=recoveredBillNo;
     } else {
       // No screenshot stored — still restore financial data
-      receipts[0].amount=f.paid;
+      receipts[0].amount=round2(f.paid-(parkingEnabled?parkingAmount:0));
       receipts[0].method=f.paymentMethod||'';
       receipts[0].date=f.paidDate||todayStr;
     }
   }
 
-  function rowsTotal(){ return round2(receipts.reduce((s,r)=>s+(parseFloat(r.amount)||0),0)); }
+  function currentParking(){
+    const chk=document.getElementById('pParkingChk');
+    const amtEl=document.getElementById('pParkingAmt');
+    const on=chk?chk.checked:parkingEnabled;
+    const amt=on?round2(parseFloat(amtEl?amtEl.value:parkingAmount)||0):0;
+    return{on,amt};
+  }
+  function rowsTotal(){ return round2(receipts.reduce((s,r)=>s+(parseFloat(r.amount)||0),0)+currentParking().amt); }
 
   function autoStatus(){
     const tot=rowsTotal();
-    return computeFlatStatus(round2(f.due-tot),tot,f.carryForward,f.prevStatus||null);
+    return computeFlatStatus(round2(effectiveDue()-tot),tot,f.carryForward,f.prevStatus||null);
   }
 
   function receiptRowHTML(r,idx){
@@ -2171,21 +2499,31 @@ function openPaymentModal(key,flatId){
 
   function refreshPaySummary(){
     const tot=rowsTotal();
+    const{on:parkingOn,amt:parkingAmt}=currentParking();
+    const dDue=effectiveDue();
     const status=autoStatus();
     const statusColor=status==='paid'?'var(--paid)':status==='partial'?'var(--partial)':'var(--unpaid)';
     const statusLabel=status==='paid'?'✅ Fully Paid':status==='partial'?'🟡 Partially Paid':'🔴 Unpaid';
     document.getElementById('paySummaryEl').innerHTML=`
       <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;">
-        <span style="color:var(--muted);">Total Due</span>
-        <span style="font-weight:700;">${inr(f.due)}</span>
+        <span style="color:var(--muted);">Total Due${dDue<originalDue?' (No Occupancy)':''}</span>
+        <span style="font-weight:700;">${dDue<originalDue?`<s style="opacity:.55;font-weight:400;margin-right:5px;">${inr(originalDue)}</s>`:''}${inr(dDue)}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;border-top:1px solid var(--border2);">
-        <span style="color:var(--muted);">Total Received (${receipts.length} receipt${receipts.length>1?'s':''})</span>
-        <span style="font-weight:700;color:var(--paid);">${inr(tot)}</span>
+        <span style="color:var(--muted);">Receipts (${receipts.length} receipt${receipts.length>1?'s':''})</span>
+        <span style="font-weight:700;color:var(--paid);">${inr(round2(receipts.reduce((s,r)=>s+(parseFloat(r.amount)||0),0)))}</span>
       </div>
-      ${tot>0?`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;">
+      ${parkingOn?`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;">
+        <span style="color:var(--muted);">🅿️ Parking Charge</span>
+        <span style="font-weight:700;color:var(--accent2);">${inr(parkingAmt)}</span>
+      </div>`:''}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;border-top:1px solid var(--border2);">
+        <span style="color:var(--muted);">Total Received</span>
+        <span style="font-weight:800;color:var(--paid);">${inr(tot)}</span>
+      </div>
+      ${tot>0&&tot<dDue?`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:13px;">
         <span style="color:var(--muted);">Balance Remaining</span>
-        <span style="font-weight:700;color:${tot>=f.due?'var(--paid)':'var(--partial)'};">${inr(round2(f.due-tot))}</span>
+        <span style="font-weight:700;color:var(--partial);">${inr(round2(dDue-tot))}</span>
       </div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0 2px;font-size:13px;border-top:1px solid var(--border2);margin-top:2px;">
         <span style="color:var(--muted);">Status</span>
@@ -2288,14 +2626,30 @@ function openPaymentModal(key,flatId){
           ℹ️ Editing existing payment — previous data has been pre-loaded. Attachments are ready to view or download.
         </div>`:''}
         <div style="background:var(--panel3);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:12.5px;color:var(--muted);">
-          Total Due: <strong style="color:var(--text)">${inr(f.due)}</strong>
-          <span style="margin-left:8px;font-size:11.5px;">(base ${inr(f.due-f.carryForward)}${f.carryForward>0?' + carry-forward '+inr(f.carryForward):''})</span>
+          Standard Due: <strong style="color:var(--text)">${inr(originalDue)}</strong>
+          <span style="margin-left:8px;font-size:11.5px;">(base ${inr(round2(originalDue-f.carryForward))}${f.carryForward>0?' + carry-forward '+inr(f.carryForward):''})</span>
         </div>
 
         <div style="font-size:12px;color:var(--accent2);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Receipts</div>
         <div id="payReceiptsEl"></div>
 
         <button class="btn" id="addReceiptBtn" style="margin-bottom:14px;font-size:12.5px;padding:7px 14px;border-style:dashed;">+ Add Receipt</button>
+
+        <div style="display:flex;align-items:center;gap:10px;background:var(--panel3);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+          <input type="checkbox" id="pParkingChk" ${parkingEnabled?'checked':''} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;">
+          <label for="pParkingChk" style="margin:0;font-size:12.5px;flex:1;cursor:pointer;">🅿️ Include Parking Charge</label>
+          <div style="position:relative;">
+            <span style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:12px;pointer-events:none;">₹</span>
+            <input type="number" id="pParkingAmt" value="${parkingAmount}" min="0" step="0.01" ${parkingEnabled?'':'disabled'}
+              style="width:100px;padding:6px 8px 6px 20px;border-radius:7px;border:1px solid var(--border2);background:var(--panel2);color:var(--text);font-size:12.5px;box-sizing:border-box;opacity:${parkingEnabled?'1':'.55'};">
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;background:var(--panel3);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+          <input type="checkbox" id="pOccupancyChk" ${noOccupancy?'checked':''} style="width:17px;height:17px;flex-shrink:0;cursor:pointer;">
+          <label for="pOccupancyChk" style="margin:0;font-size:12.5px;flex:1;cursor:pointer;">🏠 No Occupancy — 50% Maintenance Reduction</label>
+          <span id="pOccupancyNote" style="font-size:11.5px;color:var(--muted);white-space:nowrap;"></span>
+        </div>
 
         <div id="paySummaryEl" style="background:var(--panel3);border:1px solid var(--border2);border-radius:10px;padding:10px 14px;margin-bottom:4px;"></div>
 
@@ -2315,6 +2669,25 @@ function openPaymentModal(key,flatId){
       const el=document.getElementById('payReceiptsEl');
       if(el&&el.lastElementChild) el.lastElementChild.scrollIntoView({behavior:'smooth',block:'nearest'});
     };
+
+    // Parking charge — ticking it in/out (or editing the amount) live-updates the auto-summed total
+    document.getElementById('pParkingChk').onchange=(e)=>{
+      const amtEl=document.getElementById('pParkingAmt');
+      amtEl.disabled=!e.target.checked;
+      amtEl.style.opacity=e.target.checked?'1':'.55';
+      refreshPaySummary();
+    };
+    document.getElementById('pParkingAmt').oninput=refreshPaySummary;
+
+    // No Occupancy — halves the Total Due used for balance/status the moment it's ticked
+    function refreshOccupancyNote(){
+      const on=document.getElementById('pOccupancyChk').checked;
+      document.getElementById('pOccupancyNote').innerHTML=on
+        ? `<s style="opacity:.6;">${inr(originalDue)}</s> → <b style="color:var(--accent2);">${inr(round2(originalDue/2))}</b>`
+        : `Standard due: <b>${inr(originalDue)}</b>`;
+    }
+    document.getElementById('pOccupancyChk').onchange=()=>{ refreshOccupancyNote(); refreshPaySummary(); };
+    refreshOccupancyNote();
 
     document.getElementById('saveBtn').onclick=async()=>{
       const errEl=document.getElementById('pErr');
@@ -2338,6 +2711,12 @@ function openPaymentModal(key,flatId){
         if(r.method) parts.push(r.method.toUpperCase());
         return parts.join(' | ');
       }).join(' ; ');
+      const{on:parkingOn,amt:parkingAmt}=currentParking();
+      const noOcc=document.getElementById('pOccupancyChk').checked;
+      let commentsFinal=parkingOn&&parkingAmt>0
+        ? (comments?comments+' ; ':'')+`Parking: ₹${parkingAmt.toFixed(2)}`
+        : comments;
+      if(noOcc) commentsFinal=(commentsFinal?commentsFinal+' ; ':'')+`NoOccupancy|FullDue:${originalDue.toFixed(2)}`;
 
       // Serialise ALL receipts (images + metadata) as a JSON array — every bill is preserved
       const activeReceipts=receipts.filter(r=>parseFloat(r.amount)>0);
@@ -2355,8 +2734,9 @@ function openPaymentModal(key,flatId){
 
       setBtnLoading('saveBtn',true,'Saving…');
       try{
-        await recordPayment(key,flatId,tot,date,prop,method,comments,screenshotsJson);
-        closeModal();render();toast(`✅ ${flatId} — ${inr(tot)} saved (${receipts.filter(r=>parseFloat(r.amount)>0).length} receipt${receipts.filter(r=>parseFloat(r.amount)>0).length>1?'s':''})`, 'ok');
+        await recordPayment(key,flatId,tot,date,prop,method,commentsFinal,screenshotsJson,noOcc?round2(originalDue/2):originalDue);
+        const rCount=receipts.filter(r=>parseFloat(r.amount)>0).length;
+        closeModal();render();toast(`✅ ${flatId} — ${inr(tot)} saved (${rCount} receipt${rCount>1?'s':''}${parkingOn&&parkingAmt>0?' + Parking':''}${noOcc?' + No Occupancy':''})`, 'ok');
       }catch(e){ errEl.textContent='❌ Save failed: '+e.message; setBtnLoading('saveBtn',false,'Save Payment'); }
     };
 
@@ -2396,9 +2776,9 @@ async function openCloseMonthModal(key){
 
   // ── Status banner ──
   function bannerHTML(){
-    if(cs.status==='ontime') return `<div class="banner-ok">✅ Today is the last day of <strong>${m.label}</strong> — closing right on time!</div>`;
-    if(cs.status==='grace')  return `<div class="banner-grace">⏳ <strong>${cs.daysOver} day${cs.daysOver>1?'s':''} past</strong> month-end (${lastDay.toLocaleDateString('en-IN',{day:'numeric',month:'long'})}). Grace period: <strong>${cs.graceLeft} day${cs.graceLeft!==1?'s':''}</strong> left before auto-close. Admin override active.</div>`;
-    if(cs.status==='early')  return `<div class="banner-early">📅 <strong>${m.label}</strong> officially closes on ${lastDay.toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'})} (${cs.daysLeft} day${cs.daysLeft!==1?'s':''} away). Admin early-close override active.</div>`;
+    if(cs.status==='ontime') return `<div class="banner-ok">✅ Today is the last day of <strong>${m.label}</strong> — this month closes automatically today, sealed by President.</div>`;
+    if(cs.status==='overdue') return `<div class="banner-grace">🔒 <strong>${cs.daysOver} day${cs.daysOver>1?'s':''} past</strong> month-end (${fmtDDMMYYYY(lastDay)}) — this month should already be auto-closed. Close it now to seal it and carry the balance forward.</div>`;
+    if(cs.status==='early')  return `<div class="banner-early">📅 <strong>${m.label}</strong> closes automatically on ${fmtDDMMYYYY(lastDay)} (${cs.daysLeft} day${cs.daysLeft!==1?'s':''} away). Admin early-close override active.</div>`;
     return '';
   }
 
@@ -2639,7 +3019,7 @@ async function openCloseMonthModal(key){
 function openReopenConfirm(key){
   if(!isAdmin()){ toast('🔒 Admin access required to reopen a sealed month','err'); return; }
   const m=state.months[key];
-  const closedDt=m.closedAt?new Date(m.closedAt).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'}):'';
+  const closedDt=m.closedAt?fmtDDMMYYYYTime(m.closedAt):'';
   document.getElementById('modalRoot').innerHTML=`
     <div class="overlay" id="ov"><div class="modal">
       <h3>🔓 Reopen Sealed Month?</h3>
@@ -2732,7 +3112,7 @@ async function openHistoryModal(key){
     }
     el.innerHTML=`<div class="snap-list">${snaps.map(s=>{
       const dt=new Date(s.snapshot_at);
-      const dateStr=dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+      const dateStr=fmtDDMMYYYY(dt);
       const timeStr=dt.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
       const label=TRIGGER_LABELS[s.trigger]||s.trigger;
       const dotCls=TRIGGER_DOT_CLASS[s.trigger]||'edit_total';
@@ -2815,7 +3195,7 @@ const EXPORT_COLUMNS=[
   {key:'paid',      label:'Paid',            get:(f,d)=>d.paid},
   {key:'balance',   label:'Balance',         get:(f,d)=>d.balance},
   {key:'status',    label:'Status',          get:(f,d)=>d.status},
-  {key:'paidOn',    label:'Paid On',         get:(f,d)=>d.paidDate||''},
+  {key:'paidOn',    label:'Paid On',         get:(f,d)=>d.paidDate?fmtDDMMYYYY(d.paidDate):''},
   {key:'method',    label:'Payment Method',  get:(f,d)=>d.paymentMethod?d.paymentMethod.toUpperCase():''},
   {key:'comments',  label:'Comments (Cash)', get:(f,d)=>d.paymentMethod==='cash'?(d.paymentComments||''):''},
 ];
@@ -2886,15 +3266,14 @@ function statusFilterLabel(statuses){
 function exportPDF(key,statuses){
   const m=state.months[key];
   statuses=statuses||['paid','partial','unpaid'];
-  // jsPDF's built-in Helvetica font has no glyph for ₹ (U+20B9) — it silently falls
-  // back to "1". Use a plain "Rs." prefix for all amounts inside the PDF only;
-  // on-screen UI and the Excel export keep the real ₹ symbol since those render fine.
-  const inrPdf=n=>'Rs. '+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
   const{jsPDF}=window.jspdf;const doc=new jsPDF();
   const pageW=doc.internal.pageSize.getWidth();
   const flatsFiltered=ALL_FLATS.filter(f=>statuses.includes(m.flats[f.id].status));
   const collected=flatsFiltered.reduce((s,f)=>s+m.flats[f.id].paid,0);
-  const pending=round2(flatsFiltered.reduce((s,f)=>s+m.flats[f.id].balance,0));
+  // Pending Balance always reflects the WHOLE month (same figure as the Dashboard's
+  // "Pending" card) regardless of which statuses are filtered into this report —
+  // filtering which flats are listed shouldn't change what's actually still owed.
+  const pending=round2(ALL_FLATS.reduce((s,f)=>s+m.flats[f.id].balance,0));
 
   // ── Header banner ──────────────────────────────────────────
   doc.setFillColor(26,19,48);
@@ -2913,8 +3292,9 @@ function exportPDF(key,statuses){
   doc.text('Maintenance Billing Statement',42,21.5);
   doc.setFontSize(8.5);
   doc.setTextColor(140,160,190);
-  const genDate=new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
-  doc.text(`${m.label}   ·   Generated ${genDate}`,42,27.5);
+  const genDate=fmtDDMMYYYY(new Date());
+  const genTime=new Date().toLocaleTimeString('en-IN',{hour:'numeric',minute:'2-digit',hour12:true});
+  doc.text(`${m.label}   ·   Generated ${genDate}, ${genTime}`,42,27.5);
 
   // ── Summary strip ──────────────────────────────────────────
   let y=46;
@@ -2934,7 +3314,7 @@ function exportPDF(key,statuses){
   doc.text(String(flatsFiltered.length)+' of '+TOTAL_FLATS,146,y+5.5);
   doc.setDrawColor(220,225,232);doc.setLineWidth(.3);doc.line(14,y+9,pageW-14,y+9);
 
-  const rows=flatsFiltered.map(f=>{const d=m.flats[f.id];return[f.id,inrPdf(d.carryForward),inrPdf(d.due),inrPdf(d.paid),inrPdf(d.balance),d.status.toUpperCase(),d.paidDate||'—',d.paymentMethod?d.paymentMethod.toUpperCase():'—'];});
+  const rows=flatsFiltered.map(f=>{const d=m.flats[f.id];return[f.id,inrPdf(d.carryForward),inrPdf(d.due),inrPdf(d.paid),balPdf(d.balance),d.status.toUpperCase(),d.paidDate?fmtDDMMYYYY(d.paidDate):'—',d.paymentMethod?d.paymentMethod.toUpperCase():'—'];});
   doc.autoTable({
     startY:y+14,
     head:[['Flat','Carry Fwd','Total Due','Paid','Balance','Status','Paid On','Method']],
@@ -2962,7 +3342,9 @@ function exportExcel(key,statuses,cols){
   const header=colDefs.map(c=>c.label);
   const rows=flatsFiltered.map(f=>{const d=m.flats[f.id];return colDefs.map(c=>c.get(f,d));});
   const collected=flatsFiltered.reduce((s,f)=>s+m.flats[f.id].paid,0);
-  const pending=round2(flatsFiltered.reduce((s,f)=>s+m.flats[f.id].balance,0));
+  // Pending Balance always reflects the WHOLE month (same figure as the Dashboard's
+  // "Pending" card) regardless of which statuses are filtered into this report.
+  const pending=round2(ALL_FLATS.reduce((s,f)=>s+m.flats[f.id].balance,0));
   const ws=XLSX.utils.aoa_to_sheet([
     [ASSOC_NAME],
     [`Maintenance Billing Statement — ${m.label}`],
@@ -2982,7 +3364,7 @@ function exportExcel(key,statuses,cols){
 async function init(){
   document.getElementById('configBtn').onclick=openConfigModal;
   document.getElementById('newMonthBtn').onclick=openNewMonthModal;
-  document.getElementById('penaltyBtn').onclick=()=>toast('⚙ Late-payment penalty configuration is coming in a future update.','ok');
+  document.getElementById('penaltyBtn').onclick=()=>{ if(isAdmin()) openPenaltyConfigModal(); else openLoginModal(); };
   document.getElementById('flatCountLabel').textContent=`${TOTAL_FLATS} Flats · Blocks ${BLOCKS[0].block}–${BLOCKS[BLOCKS.length-1].block}`;
   if(isTursoConfigured()){
     updateDbUI('loading','Connecting…');
